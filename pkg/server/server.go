@@ -206,7 +206,7 @@ func (c *Server) getHandler(backendMapper BackendMapper, ec2DescribeQps int, ec2
 
 	h := &handler{
 		verifier:         token.NewVerifier(c.ClusterID, c.PartitionID, instanceRegion),
-		ec2Provider:      ec2provider.New(c.ServerEC2DescribeInstancesRoleARN, instanceRegion, ec2DescribeQps, ec2DescribeBurst),
+		ec2Provider:      ec2provider.New(c.ServerEC2DescribeInstancesRoleARN, instanceRegion, ec2DescribeQps, ec2DescribeBurst, c.Config.MoreRegion),
 		clusterID:        c.ClusterID,
 		backendMapper:    backendMapper,
 		scrubbedAccounts: c.Config.ScrubbedAWSAccounts,

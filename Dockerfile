@@ -14,18 +14,8 @@
 ARG image=public.ecr.aws/eks-distro-build-tooling/eks-distro-minimal-base-nonroot:2023-09-06-1694026927.2
 ARG golang_image=public.ecr.aws/docker/library/golang:1.21.5
 
-FROM --platform=$BUILDPLATFORM $golang_image AS builder
-WORKDIR /go/src/github.com/kubernetes-sigs/aws-iam-authenticator
-COPY . .
-RUN go version
-RUN goproxy=https://goproxy.io go mod download
-ARG TARGETOS TARGETARCH
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH make bin
-RUN chown 65532 _output/bin/aws-iam-authenticator
-
-FROM --platform=$TARGETPLATFORM public.ecr.aws/eks-distro/kubernetes/go-runner:v0.9.0-eks-1-21-4 as go-runner
-
-FROM --platform=$TARGETPLATFORM $image
+FROM --platform=linux/amd64 public.ecr.aws/eks-distro/kubernetes/go-runner:v0.9.0-eks-1-21-4 as go-runner
+FROM --platform=linux/amd64 $image
 COPY --from=go-runner /usr/local/bin/go-runner /usr/local/bin/go-runner
-COPY --from=builder /go/src/github.com/kubernetes-sigs/aws-iam-authenticator/_output/bin/aws-iam-authenticator /aws-iam-authenticator
+COPY _output/bin/aws-iam-authenticator__linux_amd64 /aws-iam-authenticator
 ENTRYPOINT ["/aws-iam-authenticator"]

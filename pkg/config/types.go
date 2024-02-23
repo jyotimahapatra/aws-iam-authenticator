@@ -183,6 +183,8 @@ type Config struct {
 	ReservedPrefixConfig map[string]ReservedPrefixConfig
 	// Dynamic File Path for BackendMode
 	DynamicBackendModePath string
+
+	MoreRegion string
 }
 
 type ReservedPrefixConfig struct {

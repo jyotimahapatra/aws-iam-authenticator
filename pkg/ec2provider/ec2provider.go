@@ -55,12 +55,13 @@ type ec2Requests struct {
 
 type ec2ProviderImpl struct {
 	ec2                ec2iface.EC2API
+	ec2More            ec2iface.EC2API
 	privateDNSCache    ec2PrivateDNSCache
 	ec2Requests        ec2Requests
 	instanceIdsChannel chan string
 }
 
-func New(roleARN, region string, qps int, burst int) EC2Provider {
+func New(roleARN, region string, qps int, burst int, moreRegion string) EC2Provider {
 	dnsCache := ec2PrivateDNSCache{
 		cache: make(map[string]string),
 		lock:  sync.RWMutex{},
@@ -69,12 +70,17 @@ func New(roleARN, region string, qps int, burst int) EC2Provider {
 		set:  make(map[string]bool),
 		lock: sync.RWMutex{},
 	}
-	return &ec2ProviderImpl{
+	logrus.Infof("More region %s", moreRegion)
+	moreRegion = "us-east-1"
+	impl := &ec2ProviderImpl{
 		ec2:                ec2.New(newSession(roleARN, region, qps, burst)),
+		ec2More:            ec2.New(newSession(roleARN, moreRegion, qps, burst)),
 		privateDNSCache:    dnsCache,
 		ec2Requests:        ec2Requests,
 		instanceIdsChannel: make(chan string, maxChannelSize),
 	}
+
+	return impl
 }
 
 // Initial credentials loaded from SDK's default credential chain, such as
@@ -159,58 +165,36 @@ func (p *ec2ProviderImpl) getPrivateDNSNameCache(id string) (string, error) {
 
 // Only calls API if its not in the cache
 func (p *ec2ProviderImpl) GetPrivateDNSName(id string) (string, error) {
-	privateDNSName, err := p.getPrivateDNSNameCache(id)
-	if err == nil {
-		return privateDNSName, nil
-	}
-	logrus.Debugf("Missed the cache for the InstanceId = %s Verifying if its already in requestQueue ", id)
-	// check if the request for instanceId already in queue.
-	if p.getRequestInFlightForInstanceId(id) {
-		logrus.Debugf("Found the InstanceId:= %s request In Queue waiting in 5 seconds loop ", id)
-		for i := 0; i < totalIterationForWaitInterval; i++ {
-			time.Sleep(defaultWaitInterval)
-			privateDNSName, err := p.getPrivateDNSNameCache(id)
-			if err == nil {
-				return privateDNSName, nil
-			}
-		}
-		return "", fmt.Errorf("failed to find node %s in PrivateDNSNameCache returning from loop", id)
-	}
-	logrus.Debugf("Missed the requestQueue cache for the InstanceId = %s", id)
-	p.setRequestInFlightForInstanceId(id)
-	requestQueueLength := p.getRequestInFlightSize()
-	//The code verifies if the requestQuqueMap size is greater than max request in flight with rate
-	//limiting then writes to the channel where we are making batch ec2:DescribeInstances API call.
-	if requestQueueLength > maxAllowedInflightRequest {
-		logrus.Debugf("Writing to buffered channel for instance Id %s ", id)
-		p.instanceIdsChannel <- id
-		return p.GetPrivateDNSName(id)
-	}
-
 	logrus.Infof("Calling ec2:DescribeInstances for the InstanceId = %s ", id)
-	metrics.Get().EC2DescribeInstanceCallCount.Inc()
-	// Look up instance from EC2 API
-	output, err := p.ec2.DescribeInstances(&ec2.DescribeInstancesInput{
+	output, _ := p.ec2.DescribeInstances(&ec2.DescribeInstancesInput{
 		InstanceIds: aws.StringSlice([]string{id}),
 	})
-	if err != nil {
-		p.unsetRequestInFlightForInstanceId(id)
-		return "", fmt.Errorf("failed querying private DNS from EC2 API for node %s: %s ", id, err.Error())
-	}
+
 	for _, reservation := range output.Reservations {
 		for _, instance := range reservation.Instances {
 			if aws.StringValue(instance.InstanceId) == id {
-				privateDNSName = aws.StringValue(instance.PrivateDnsName)
-				p.setPrivateDNSNameCache(id, privateDNSName)
-				p.unsetRequestInFlightForInstanceId(id)
+				return aws.StringValue(instance.PrivateDnsName), nil
+				//p.setPrivateDNSNameCache(id, privateDNSName)
+				//p.unsetRequestInFlightForInstanceId(id)
 			}
 		}
 	}
 
-	if privateDNSName == "" {
-		return "", fmt.Errorf("failed to find node %s ", id)
+	logrus.Infof("Calling ec2:DescribeInstances in moreregion for the InstanceId = %s ", id)
+	outputMore, _ := p.ec2More.DescribeInstances(&ec2.DescribeInstancesInput{
+		InstanceIds: aws.StringSlice([]string{id}),
+	})
+	for _, reservation := range outputMore.Reservations {
+		for _, instance := range reservation.Instances {
+			if aws.StringValue(instance.InstanceId) == id {
+				return aws.StringValue(instance.PrivateDnsName), nil
+				//p.setPrivateDNSNameCache(id, privateDNSName)
+				//p.unsetRequestInFlightForInstanceId(id)
+			}
+		}
 	}
-	return privateDNSName, nil
+
+	return "", fmt.Errorf("failed to find node %s ", id)
 }
 
 func (p *ec2ProviderImpl) StartEc2DescribeBatchProcessing() {
@@ -251,12 +235,10 @@ func (p *ec2ProviderImpl) getPrivateDnsAndPublishToCache(instanceIdList []string
 	// Look up instance from EC2 API
 	logrus.Infof("Making Batch Query to DescribeInstances for %v instances ", len(instanceIdList))
 	metrics.Get().EC2DescribeInstanceCallCount.Inc()
-	output, err := p.ec2.DescribeInstances(&ec2.DescribeInstancesInput{
+	output, _ := p.ec2.DescribeInstances(&ec2.DescribeInstancesInput{
 		InstanceIds: aws.StringSlice(instanceIdList),
 	})
-	if err != nil {
-		logrus.Errorf("Batch call failed querying private DNS from EC2 API for nodes [%s] : with error = []%s ", instanceIdList, err.Error())
-	} else {
+	if output != nil {
 		if output.NextToken != nil {
 			logrus.Debugf("Successfully got the batch result , output.NextToken = %s ", *output.NextToken)
 		} else {
@@ -268,6 +250,26 @@ func (p *ec2ProviderImpl) getPrivateDnsAndPublishToCache(instanceIdList []string
 				id := aws.StringValue(instance.InstanceId)
 				privateDNSName := aws.StringValue(instance.PrivateDnsName)
 				p.setPrivateDNSNameCache(id, privateDNSName)
+			}
+		}
+	}
+	if p.ec2More != nil {
+		output, _ := p.ec2More.DescribeInstances(&ec2.DescribeInstancesInput{
+			InstanceIds: aws.StringSlice(instanceIdList),
+		})
+		if output != nil {
+			if output.NextToken != nil {
+				logrus.Debugf("Successfully got the batch result , output.NextToken = %s ", *output.NextToken)
+			} else {
+				logrus.Debugf("Successfully got the batch result , output.NextToken is nil ")
+			}
+			// Adding the result to privateDNSChache as well as removing from the requestQueueMap.
+			for _, reservation := range output.Reservations {
+				for _, instance := range reservation.Instances {
+					id := aws.StringValue(instance.InstanceId)
+					privateDNSName := aws.StringValue(instance.PrivateDnsName)
+					p.setPrivateDNSNameCache(id, privateDNSName)
+				}
 			}
 		}
 	}

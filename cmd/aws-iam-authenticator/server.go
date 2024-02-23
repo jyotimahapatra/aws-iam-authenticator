@@ -1,4 +1,5 @@
 //go:build !no_server
+
 /*
 Copyright 2017 by the contributors.
 
@@ -103,6 +104,9 @@ func init() {
 		"127.0.0.1",
 		"IP Address to bind the aws-iam-authenticator server to listen to. For example: 127.0.0.1 or 0.0.0.0")
 	viper.BindPFlag("server.address", serverCmd.Flags().Lookup("address"))
+
+	serverCmd.Flags().String("more-region", "", "")
+	viper.BindPFlag("server.moreRegion", serverCmd.Flags().Lookup("more-region"))
 
 	serverCmd.Flags().StringSlice("backend-mode",
 		[]string{mapper.ModeMountedFile},
